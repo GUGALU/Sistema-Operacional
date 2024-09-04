@@ -51,5 +51,3 @@ Considerando o terminal do MSYS2:
 
 **unset TERM**    
 **./arq-sim-so.exe**
-# Sistema-operacional
-# Sistema-Operacional
