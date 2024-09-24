@@ -29,6 +29,8 @@ namespace OS
     uint16_t pc;                  // Program Counter
     std::array<uint16_t, 8> gprs; // General-purpose registers
     Process *next;
+    uint16_t base_addr;  // Base address for virtual memory
+    uint16_t limit_addr; // Limit address for virtual memory
   };
 
   Arch::Terminal *t;
@@ -36,7 +38,11 @@ namespace OS
   Process *current_process = nullptr;
   std::string command_buffer = "";
 
-  // ---------------------------------------
+  void processInit();
+  void processCreate(std::string_view name, uint16_t pc);
+  void processRun();
+  void processStatus();
+  void processDestroy();
 
   void boot(Arch::Terminal *terminal, Arch::Cpu *cpu)
   {
@@ -46,6 +52,24 @@ namespace OS
 
     t = terminal;
     c = cpu;
+
+    // Initialize the first process
+    processInit();
+
+    // Create a new process
+    processCreate("second", 0x0001);
+
+    // Execute the process
+    processRun();
+
+    c->set_gpr(0, 1);      // Define syscall 1 (print string in the memory)
+    c->set_gpr(1, 0x1000); // String address in the memory
+    syscall();
+
+    c->set_gpr(0, 2); // Define syscall 2 (new line)
+    syscall();
+
+    processStatus(); // Show process status
   }
 
   void interrupt(const Arch::InterruptCode interrupt)
@@ -54,66 +78,106 @@ namespace OS
     {
       char typed = t->read_typed_char();
 
-      if (typed != '\0')
+      if (typed == '\b')
       {
-        if (typed == '\b')
+        if (!command_buffer.empty())
         {
-          if (!command_buffer.empty())
+          command_buffer.pop_back();
+          t->print_str(Arch::Terminal::Type::Command, "\b \b");
+        }
+      }
+      else
+      {
+        command_buffer += typed;
+        t->print_str(Arch::Terminal::Type::Command, std::string(1, typed));
+      }
+
+      if (typed == '\n')
+      {
+        if (command_buffer.rfind("/syscall ", 0) == 0)
+        {
+          std::string syscall_num_str = command_buffer.substr(9); // Take the syscall number
+          uint16_t syscall_num = std::stoi(syscall_num_str);
+
+          c->set_gpr(0, syscall_num); // Syscall number
+          // Add new syscalls here
+
+          syscall();
+
+          t->println(Arch::Terminal::Type::App, "Syscall " + std::to_string(syscall_num) + " executed.");
+        }
+        else if (command_buffer.rfind("/load ", 0) == 0) // Load a new process
+        {
+          std::string program_name = command_buffer.substr(6); // Extract the program name
+          processCreate(program_name, 0x0001);                 // Load process
+          t->println(Arch::Terminal::Type::Kernel, "Programa " + program_name + " carregado.");
+        }
+        else if (command_buffer == "/kill\n") // Kill process
+        {
+          if (current_process != nullptr)
           {
-            command_buffer.pop_back();
-            t->print_str(Arch::Terminal::Type::Command, "\b \b");
+            t->println(Arch::Terminal::Type::Kernel, "Killing process " + current_process->name);
+            processDestroy();
+          }
+          else
+          {
+            t->println(Arch::Terminal::Type::Kernel, "No process to kill.");
           }
         }
-        else
+        else if (command_buffer == "/status\n") // Show process status
         {
-          command_buffer += typed;
-          t->print_str(Arch::Terminal::Type::Command, std::string(1, typed));
-        }
-
-        if (typed == '\n')
-        {
-          command_buffer.clear();
-        }
-
-        if (command_buffer == "/exit\n")
-        {
-          t->println(Arch::Terminal::Type::Kernel, "Shutting down...");
-          std::this_thread::sleep_for(std::chrono::seconds(2));
-          c->turn_off();
+          if (current_process != nullptr)
+          {
+            processStatus();
+          }
+          else
+          {
+            t->println(Arch::Terminal::Type::Kernel, "No process running.");
+          }
         }
         else
         {
           t->println(Arch::Terminal::Type::App, "Unknown command: " + command_buffer);
         }
+
+        command_buffer.clear();
       }
     }
   }
 
-  // ---------------------------------------
-
   void syscall()
   {
-    const uint16_t syscall = cpu->get_gpr(0);
-    uint16_t strAdr = cpu->get_gpr(1);
+    const uint16_t syscall = c->get_gpr(0);
+    uint16_t strAdr = c->get_gpr(1); // Address of the syscall
+
+    // Verify if the address is valid
+    if (strAdr < current_process->base_addr || strAdr >= current_process->limit_addr)
+    {
+      t->println(Arch::Terminal::Type::Kernel, "General Protection Fault: Invalid memory access.");
+      return;
+    }
 
     switch (syscall)
     {
     case 0:
-      cpu->turn_off();
+      t->println(Arch::Terminal::Type::Kernel, "Shutting down...");
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      c->turn_off();
       break;
     case 1:
-      while (cpu->pmem_read(strAdr))
+    {
+      while (c->pmem_read(strAdr))
       {
-        uint16_t c = cpu->pmem_read(strAdr);
-        t->print(Arch::Terminal::Type::App, static_cast<char>(c));
+        t->print(Arch::Terminal::Type::App, static_cast<char>(c->pmem_read(strAdr)));
         strAdr++;
       }
       break;
+    }
     case 2:
       t->println(Arch::Terminal::Type::App);
       break;
-    case 3:
-      t->print(Arch::Terminal::Type::App, strAdr);
+    default:
+      t->println(Arch::Terminal::Type::App, "Syscall desconhecida: " + std::to_string(syscall));
       break;
     }
   }
@@ -128,6 +192,10 @@ namespace OS
     p->pc = 0;
     p->gprs.fill(0);
     p->next = nullptr;
+
+    p->base_addr = 0x1000;
+    p->limit_addr = 0x2000;
+
     current_process = p;
   }
 
@@ -137,10 +205,13 @@ namespace OS
     p->id = current_process->id + 1;
     p->begin = false;
     p->name = name;
-    p->status = ProcessStatus::await;
+    p->status = ProcessStatus::ready;
     p->pc = pc;
     p->gprs.fill(0);
     p->next = nullptr;
+
+    p->base_addr = 0x1000;
+    p->limit_addr = 0x2000;
     current_process->next = p;
   }
 
@@ -156,18 +227,24 @@ namespace OS
     if (current_process->status == ProcessStatus::exec)
     {
       c->set_pc(current_process->pc);
-      c->set_gprs(current_process->gprs);
-      c->run();
+      for (uint8_t i = 0; i < current_process->gprs.size(); ++i)
+      {
+        c->set_gpr(i, current_process->gprs[i]);
+      }
+      c->run_cycle();
     }
   }
 
   void processSave()
   {
     current_process->pc = c->get_pc();
-    current_process->gprs = c->get_gprs();
+    for (uint8_t i = 0; i < current_process->gprs.size(); ++i)
+    {
+      current_process->gprs[i] = c->get_gpr(i);
+    }
   }
 
-  void processSt atus()
+  void processStatus()
   {
     if (current_process->status == ProcessStatus::exec)
     {
@@ -177,12 +254,8 @@ namespace OS
     {
       t->println(Arch::Terminal::Type::Kernel, "Process " + current_process->name + " is ready");
     }
-  }
 
-  void virtualMemory()
-  {
-    cpu->set_vmem_paddr_init(0x000);
-    cpu->set_vmem_paddr_end(0xFFFF);
+    t->println(Arch::Terminal::Type::Kernel, "Base Address: 0x" + std::to_string(current_process->base_addr));
+    t->println(Arch::Terminal::Type::Kernel, "Limit Address: 0x" + std::to_string(current_process->limit_addr));
   }
-
 } // end namespace OS
