@@ -43,6 +43,8 @@ namespace OS
   void processRun();
   void processStatus();
   void processDestroy();
+  void syscall();
+  void processSave();
 
   void boot(Arch::Terminal *terminal, Arch::Cpu *cpu)
   {
@@ -76,7 +78,7 @@ namespace OS
   {
     if (interrupt == Arch::InterruptCode::Keyboard)
     {
-      char typed = t->read_typed_char();
+      int typed = t->read_typed_char();
 
       if (typed == '\b')
       {
@@ -90,6 +92,20 @@ namespace OS
       {
         command_buffer += typed;
         t->print_str(Arch::Terminal::Type::Command, std::string(1, typed));
+      }
+
+      if (t->is_backspace(typed))
+      {
+        if (!command_buffer.empty())
+        {
+          command_buffer.pop_back();
+          for (size_t i = 0; i < command_buffer.size() + 1; ++i)
+          {
+            t->print(Arch::Terminal::Type::Command, '\r');
+            t->print(Arch::Terminal::Type::Command, command_buffer);
+          }
+          t->print_str(Arch::Terminal::Type::Command, "\b \b");
+        }
       }
 
       if (typed == '\n')
@@ -184,17 +200,19 @@ namespace OS
 
   void processInit()
   {
+    // Carrega o tamanho do arquivo idle.bin
+    uint32_t idle_bin_size = Lib::get_file_size_words("idle.bin");
+
     Process *p = new Process;
     p->id = 0;
     p->begin = true;
-    p->name = "first";
+    p->name = "idle";
     p->status = ProcessStatus::exec;
     p->pc = 0;
     p->gprs.fill(0);
-    p->next = nullptr;
 
     p->base_addr = 0x1000;
-    p->limit_addr = 0x2000;
+    p->limit_addr = 0x1000 + idle_bin_size; // Aloca o limite baseado no tamanho do arquivo
 
     current_process = p;
   }
@@ -232,6 +250,19 @@ namespace OS
         c->set_gpr(i, current_process->gprs[i]);
       }
       c->run_cycle();
+    }
+    else if (current_process->status == ProcessStatus::ready && current_process->next != nullptr)
+    {
+      processSave();
+      current_process = current_process->next;
+      current_process->status = ProcessStatus::exec;
+      processRun();
+    }
+    else
+    {
+      current_process = current_process->next ? current_process->next : current_process;
+      current_process->status = ProcessStatus::exec;
+      processRun();
     }
   }
 
