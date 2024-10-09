@@ -59,17 +59,20 @@ namespace OS
     processInit();
 
     // Create a new process
-    processCreate("second", 0x0001);
+    processCreate("idle.bin", 0x0001);
 
     // Execute the process
     processRun();
 
+    processSave();
+
+    c->set_gpr(0, 0); // Define syscall 0 (exit)
+
     c->set_gpr(0, 1);      // Define syscall 1 (print string in the memory)
     c->set_gpr(1, 0x1000); // String address in the memory
-    syscall();
 
-    c->set_gpr(0, 2); // Define syscall 2 (new line)
-    syscall();
+    c->set_gpr(2, 2); // Define syscall 2 (new line)
+    c->set_gpr(3, 0x0002);
 
     processStatus(); // Show process status
   }
@@ -82,7 +85,7 @@ namespace OS
 
       if (typed == '\b')
       {
-        if (!command_buffer.empty())
+        if (command_buffer.empty())
         {
           command_buffer.pop_back();
           t->print_str(Arch::Terminal::Type::Command, "\b \b");
@@ -96,7 +99,7 @@ namespace OS
 
       if (t->is_backspace(typed))
       {
-        if (!command_buffer.empty())
+        if (command_buffer.empty())
         {
           command_buffer.pop_back();
           for (size_t i = 0; i < command_buffer.size() + 1; ++i)
@@ -115,18 +118,30 @@ namespace OS
           std::string syscall_num_str = command_buffer.substr(9); // Take the syscall number
           uint16_t syscall_num = std::stoi(syscall_num_str);
 
-          c->set_gpr(0, syscall_num); // Syscall number
-          // Add new syscalls here
+          c->set_gpr(0, syscall_num);
 
           syscall();
 
           t->println(Arch::Terminal::Type::App, "Syscall " + std::to_string(syscall_num) + " executed.");
         }
-        else if (command_buffer.rfind("/load ", 0) == 0) // Load a new process
+        else if (command_buffer.rfind("/load ", 0) == 0) 
         {
-          std::string program_name = command_buffer.substr(6); // Extract the program name
-          processCreate(program_name, 0x0001);                 // Load process
-          t->println(Arch::Terminal::Type::Kernel, "Programa " + program_name + " carregado.");
+          size_t space_pos = command_buffer.find(' '); 
+          if (space_pos != std::string::npos)
+          {
+            std::string program_name = command_buffer.substr(space_pos + 1); 
+            if (!program_name.empty() && program_name.back() == '\n')
+            {
+              program_name.pop_back();
+            }
+            processCreate(program_name, 0x0001); 
+            processRun();
+            t->println(Arch::Terminal::Type::Kernel, "Programa " + program_name + " carregado.");
+          }
+          else
+          {
+            t->println(Arch::Terminal::Type::Kernel, "Erro: Nome do arquivo não especificado.");
+          }
         }
         else if (command_buffer == "/kill\n") // Kill process
         {
@@ -164,19 +179,19 @@ namespace OS
   void syscall()
   {
     const uint16_t syscall = c->get_gpr(0);
-    uint16_t strAdr = c->get_gpr(1); // Address of the syscall
+    uint16_t strAdr = c->get_gpr(1);
 
-    // Verify if the address is valid
     if (strAdr < current_process->base_addr || strAdr >= current_process->limit_addr)
     {
-      t->println(Arch::Terminal::Type::Kernel, "General Protection Fault: Invalid memory access.");
+      t->println(Arch::Terminal::Type::Kernel, "General Protection Fault: Acesso de memória inválido.");
+      processDestroy();
       return;
     }
 
     switch (syscall)
     {
     case 0:
-      t->println(Arch::Terminal::Type::Kernel, "Shutting down...");
+      t->println(Arch::Terminal::Type::Kernel, "Encerrando o sistema...");
       std::this_thread::sleep_for(std::chrono::seconds(2));
       c->turn_off();
       break;
@@ -192,35 +207,42 @@ namespace OS
     case 2:
       t->println(Arch::Terminal::Type::App);
       break;
-    default:
-      t->println(Arch::Terminal::Type::App, "Syscall desconhecida: " + std::to_string(syscall));
-      break;
+    case 3:
+      t->println(Arch::Terminal::Type::App, strAdr);
     }
   }
 
   void processInit()
   {
-    // Carrega o tamanho do arquivo idle.bin
     uint32_t idle_bin_size = Lib::get_file_size_words("idle.bin");
+    if (idle_bin_size == 0)
+    {
+      t->println(Arch::Terminal::Type::Kernel, "Erro ao carregar idle.bin");
+      return;
+    }
 
     Process *p = new Process;
     p->id = 0;
     p->begin = true;
-    p->name = "idle";
+    p->name = "idle.bin";
     p->status = ProcessStatus::exec;
     p->pc = 0;
     p->gprs.fill(0);
 
     p->base_addr = 0x1000;
-    p->limit_addr = 0x1000 + idle_bin_size; // Aloca o limite baseado no tamanho do arquivo
+    p->limit_addr = 0x1000 + idle_bin_size;
 
+    uint32_t word = Lib::get_file_size_words("idle.bin");
+    
+    c->pmem_read(word);
+    c->pmem_write(p->base_addr, word);
     current_process = p;
   }
 
   void processCreate(std::string_view name, uint16_t pc)
   {
     Process *p = new Process;
-    p->id = current_process->id + 1;
+    p->id = current_process ? current_process->id + 1 : 1;
     p->begin = false;
     p->name = name;
     p->status = ProcessStatus::ready;
@@ -228,9 +250,28 @@ namespace OS
     p->gprs.fill(0);
     p->next = nullptr;
 
-    p->base_addr = 0x1000;
-    p->limit_addr = 0x2000;
-    current_process->next = p;
+    uint32_t program_size = Lib::get_file_size_words(name);
+    if (program_size == 0)
+    {
+      t->println(Arch::Terminal::Type::Kernel, std::string("Erro ao carregar ") + std::string(name));
+      return;
+    }
+
+    p->base_addr = 0x2000;
+    p->limit_addr = p->base_addr + program_size;
+
+    uint16_t word = Lib::get_file_size_words(name);
+    c->pmem_read(word);
+    c->pmem_write(p->base_addr, word);
+
+    if (current_process != nullptr)
+    {
+      current_process->next = p;
+    }
+    else
+    {
+      current_process = p;
+    }
   }
 
   void processDestroy()
@@ -249,7 +290,6 @@ namespace OS
       {
         c->set_gpr(i, current_process->gprs[i]);
       }
-      c->run_cycle();
     }
     else if (current_process->status == ProcessStatus::ready && current_process->next != nullptr)
     {
@@ -258,11 +298,10 @@ namespace OS
       current_process->status = ProcessStatus::exec;
       processRun();
     }
-    else
+    else if (current_process == nullptr)
     {
-      current_process = current_process->next ? current_process->next : current_process;
-      current_process->status = ProcessStatus::exec;
-      processRun();
+      t->println(Arch::Terminal::Type::Kernel, "Nenhum processo em execução, retornando para idle.");
+      processInit();
     }
   }
 
