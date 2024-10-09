@@ -124,17 +124,17 @@ namespace OS
 
           t->println(Arch::Terminal::Type::App, "Syscall " + std::to_string(syscall_num) + " executed.");
         }
-        else if (command_buffer.rfind("/load ", 0) == 0) 
+        else if (command_buffer.rfind("/load ", 0) == 0)
         {
-          size_t space_pos = command_buffer.find(' '); 
+          size_t space_pos = command_buffer.find(' ');
           if (space_pos != std::string::npos)
           {
-            std::string program_name = command_buffer.substr(space_pos + 1); 
+            std::string program_name = command_buffer.substr(space_pos + 1);
             if (!program_name.empty() && program_name.back() == '\n')
             {
               program_name.pop_back();
             }
-            processCreate(program_name, 0x0001); 
+            processCreate(program_name, 0x0001);
             processRun();
             t->println(Arch::Terminal::Type::Kernel, "Programa " + program_name + " carregado.");
           }
@@ -233,7 +233,7 @@ namespace OS
     p->limit_addr = 0x1000 + idle_bin_size;
 
     uint32_t word = Lib::get_file_size_words("idle.bin");
-    
+
     c->pmem_read(word);
     c->pmem_write(p->base_addr, word);
     current_process = p;
@@ -277,12 +277,25 @@ namespace OS
   void processDestroy()
   {
     Process *p = current_process;
-    current_process = current_process->next;
-    delete p;
+    if (p->name != "idle.bin" && current_process->next != nullptr)
+    {
+      current_process = current_process->next;
+    }
+    else
+    {
+      processInit();
+      delete p;
+    }
   }
 
   void processRun()
   {
+    if (current_process == nullptr)
+    {
+      t->println(Arch::Terminal::Type::Kernel, "Nenhum processo em execução, retornando para idle.bin");
+      processInit();
+    }
+
     if (current_process->status == ProcessStatus::exec)
     {
       c->set_pc(current_process->pc);
@@ -291,17 +304,12 @@ namespace OS
         c->set_gpr(i, current_process->gprs[i]);
       }
     }
-    else if (current_process->status == ProcessStatus::ready && current_process->next != nullptr)
+    else if (current_process->status == ProcessStatus::ready)
     {
       processSave();
-      current_process = current_process->next;
+      current_process = current_process->next ? current_process->next : current_process;
       current_process->status = ProcessStatus::exec;
       processRun();
-    }
-    else if (current_process == nullptr)
-    {
-      t->println(Arch::Terminal::Type::Kernel, "Nenhum processo em execução, retornando para idle.");
-      processInit();
     }
   }
 
@@ -327,5 +335,7 @@ namespace OS
 
     t->println(Arch::Terminal::Type::Kernel, "Base Address: 0x" + std::to_string(current_process->base_addr));
     t->println(Arch::Terminal::Type::Kernel, "Limit Address: 0x" + std::to_string(current_process->limit_addr));
+    t->println(Arch::Terminal::Type::Kernel, "Program Counter: 0x" + std::to_string(current_process->pc));
+    t->println(Arch::Terminal::Type::Kernel, "General Purpose Registers: " + std::to_string(current_process->gprs.size()));
   }
 } // end namespace OS
